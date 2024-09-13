@@ -1,14 +1,24 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
+	"github.com/google/uuid"
+	"github.com/halfdan87/boot-go-blog-aggregator/internal/database"
 	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
+
+type apiConfig struct {
+	DB *database.Queries
+}
 
 func main() {
 	err := godotenv.Load()
@@ -21,10 +31,24 @@ func main() {
 		port = "8080"
 	}
 
+	dbUrl := os.Getenv("DB_CONNECTION_STRING")
+
+	db, err := sql.Open("postgres", dbUrl)
+	if err != nil {
+		log.Fatalf("Error opening database: %v", err)
+	}
+
+	dbQueries := database.New(db)
+
+	apiConfig := apiConfig{
+		DB: dbQueries,
+	}
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /v1/healthz", readinessHandler)
 	mux.HandleFunc("GET /v1/err", errorHandler)
+	mux.HandleFunc("POST /v1/users", getUsersHandler(apiConfig))
 
 	server := &http.Server{
 		Addr:    ":" + port,
@@ -60,6 +84,44 @@ func errorHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJSON(w, 500, resp)
+}
+
+func getUsersHandler(apiConfig apiConfig) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		type UsersRequest struct {
+			Name string `json:"name"`
+		}
+
+		var req UsersRequest
+		err := json.NewDecoder(r.Body).Decode(&req)
+		if err != nil {
+			respondWithError(w, 400, "Error decoding request")
+			return
+		}
+
+		type User struct {
+			ID        int       `json:"id"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Name      string    `json:"name"`
+		}
+
+		context := context.Background()
+		userParams := database.InsertUserParams{
+			ID:        uuid.New(),
+			CreatedAt: sql.NullTime{Time: time.Now(), Valid: true},
+			UpdatedAt: sql.NullTime{Time: time.Now(), Valid: true},
+			Name:      req.Name,
+		}
+
+		user, err := apiConfig.DB.InsertUser(context, userParams)
+		if err != nil {
+			respondWithError(w, 500, "Error getting users")
+			return
+		}
+
+		respondWithJSON(w, 200, user)
+	}
 }
 
 func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
