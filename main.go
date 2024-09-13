@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -48,7 +50,8 @@ func main() {
 
 	mux.HandleFunc("GET /v1/healthz", readinessHandler)
 	mux.HandleFunc("GET /v1/err", errorHandler)
-	mux.HandleFunc("POST /v1/users", getUsersHandler(apiConfig))
+	mux.HandleFunc("POST /v1/users", postUsersHandler(apiConfig))
+	mux.HandleFunc("GET /v1/users", getUsersHandler(apiConfig))
 
 	server := &http.Server{
 		Addr:    ":" + port,
@@ -86,7 +89,7 @@ func errorHandler(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, 500, resp)
 }
 
-func getUsersHandler(apiConfig apiConfig) func(w http.ResponseWriter, r *http.Request) {
+func postUsersHandler(apiConfig apiConfig) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type UsersRequest struct {
 			Name string `json:"name"`
@@ -122,6 +125,50 @@ func getUsersHandler(apiConfig apiConfig) func(w http.ResponseWriter, r *http.Re
 
 		respondWithJSON(w, 200, user)
 	}
+}
+
+func getUsersHandler(apiConfig apiConfig) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		auth := r.Header.Get("Authorization")
+
+		if auth == "" {
+			respondWithError(w, 401, "Unauthorized")
+			return
+		}
+
+		apiKey, err := getApiKeyFromAuth(auth)
+		if err != nil {
+			respondWithError(w, 401, "Unauthorized")
+			return
+		}
+
+		type User struct {
+			ID        int       `json:"id"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Name      string    `json:"name"`
+		}
+
+		context := context.Background()
+
+		user, err := apiConfig.DB.GetUserByApiKey(context, apiKey)
+		if err != nil {
+			respondWithError(w, 500, "Error getting user")
+			return
+		}
+
+		respondWithJSON(w, 200, user)
+	}
+}
+
+func getApiKeyFromAuth(auth string) (string, error) {
+	token := strings.Split(auth, " ")
+	if len(token) != 2 {
+		return "", errors.New("Invalid token")
+	}
+
+	return token[1], nil
 }
 
 func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
