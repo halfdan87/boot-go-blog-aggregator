@@ -89,6 +89,8 @@ func main() {
 	v1Router.Delete("/feed_follows/{feed_id}", apiConfig.authedHandler(deleteFeedFollowHandler(apiConfig)))
 	v1Router.Get("/feed_follows", apiConfig.authedHandler(getUserFeedFollowsHandler(apiConfig)))
 
+	v1Router.Get("/posts", apiConfig.authedHandler(getPostsHandler(apiConfig)))
+
 	router.Mount("/v1", v1Router)
 
 	server := &http.Server{
@@ -310,6 +312,28 @@ func getUserFeedFollowsHandler(apiConfig apiConfig) func(w http.ResponseWriter, 
 	}
 }
 
+/*
+Endpoint: GET /v1/posts
+
+# This is an authenticated endpoint
+
+This endpoint should return a list of posts for the authenticated user. It should accept a limit query parameter that limits the number of posts returned. The default if the parameter is not provided can be whatever you think is reasonable.
+*/
+func getPostsHandler(apiConfig apiConfig) func(w http.ResponseWriter, r *http.Request, user database.User) {
+	return func(w http.ResponseWriter, r *http.Request, user database.User) {
+		context := context.Background()
+		posts, err := apiConfig.DB.GetPostsByUser(context, user.ID)
+		fmt.Println("user id", user.ID)
+		if err != nil {
+			log.Printf("Error getting posts: %v", err)
+			respondWithError(w, 500, "Error getting posts")
+			return
+		}
+
+		respondWithJSON(w, 200, posts)
+	}
+}
+
 func getApiKeyFromAuth(auth string) (string, error) {
 	token := strings.Split(auth, " ")
 	if len(token) != 2 {
@@ -350,11 +374,7 @@ func getUnprocessedFeedsAndProcessThemAsync(apiConfig apiConfig) {
 				return
 			}
 
-			feedContent.Items = feedContent.Items[:10]
-
-			for _, item := range feedContent.Items {
-				log.Printf("Item: %v", item.Title)
-			}
+			saveRssPosts(apiConfig, feed, feedContent)
 
 			ctx := context.Background()
 			err = apiConfig.DB.MarkFeedAsFetched(ctx, feed.Url)
@@ -363,6 +383,36 @@ func getUnprocessedFeedsAndProcessThemAsync(apiConfig apiConfig) {
 				return
 			}
 		}(feed)
+	}
+}
+
+func saveRssPosts(apiConfig apiConfig, feed database.Feed, feedContent *gofeed.Feed) {
+	ctx := context.Background()
+	for _, item := range feedContent.Items {
+		log.Printf("Item: %v", item.Title)
+		publishedStr := item.Published
+		publishedTime, err := time.Parse(time.RFC1123Z, publishedStr)
+		if err != nil {
+			log.Printf("Error parsing published time: %v", err)
+			return
+		}
+
+		postParams := database.CreatePostParams{
+			ID:          uuid.New(),
+			CreatedAt:   sql.NullTime{Time: time.Now(), Valid: true},
+			UpdatedAt:   sql.NullTime{Time: time.Now(), Valid: true},
+			Title:       item.Title,
+			Url:         item.Link,
+			Description: item.Description,
+			PublishedAt: sql.NullTime{Time: publishedTime, Valid: true},
+			FeedID:      feed.ID,
+		}
+
+		_, err = apiConfig.DB.CreatePost(ctx, postParams)
+		if err != nil {
+			log.Printf("Error saving post: %v", err)
+			return
+		}
 	}
 }
 
