@@ -17,6 +17,7 @@ import (
 	"github.com/halfdan87/boot-go-blog-aggregator/internal/database"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
+	"github.com/mmcdole/gofeed"
 )
 
 type apiConfig struct {
@@ -94,6 +95,14 @@ func main() {
 		Addr:    ":" + port,
 		Handler: router,
 	}
+
+	// running processors to go off every 60 seconds
+	go func() {
+		for {
+			time.Sleep(60 * time.Second)
+			getUnprocessedFeedsAndProcessThemAsync(apiConfig)
+		}
+	}()
 
 	fmt.Println("START")
 	if err := server.ListenAndServe(); err != nil {
@@ -308,6 +317,53 @@ func getApiKeyFromAuth(auth string) (string, error) {
 	}
 
 	return token[1], nil
+}
+
+func getAndParseRssFeed(url string) (*gofeed.Feed, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	feed, err := gofeed.NewParser().Parse(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	return feed, nil
+}
+
+func getUnprocessedFeedsAndProcessThemAsync(apiConfig apiConfig) {
+	ctx := context.Background()
+	feeds, err := apiConfig.DB.GetNextFeedsToFetch(ctx, 10)
+	if err != nil {
+		log.Printf("Error getting feeds: %v", err)
+		return
+	}
+
+	for _, feed := range feeds {
+		go func(feed database.Feed) {
+			feedContent, err := getAndParseRssFeed(feed.Url)
+			if err != nil {
+				log.Printf("Error parsing feed: %v", err)
+				return
+			}
+
+			feedContent.Items = feedContent.Items[:10]
+
+			for _, item := range feedContent.Items {
+				log.Printf("Item: %v", item.Title)
+			}
+
+			ctx := context.Background()
+			err = apiConfig.DB.MarkFeedAsFetched(ctx, feed.Url)
+			if err != nil {
+				log.Printf("Error marking feed as fetched: %v", err)
+				return
+			}
+		}(feed)
+	}
 }
 
 func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
